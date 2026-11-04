@@ -1,0 +1,21 @@
+[Unit]
+Description=GLink Portal Frontend
+After=network.target glink-backend.service
+
+[Service]
+Type=simple
+User=glink
+Group=glink
+WorkingDirectory=/srv/glink-portal/current/GLink Portal-frontend
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Makassar
+ExecStart=/opt/glink-node/current/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3100
+Restart=on-failure
+RestartSec=5
+UMask=0027
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+name: glink-portal-db
+services:
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3308:3306"
+    environment:
+      MARIADB_DATABASE: globallink_approval
+      MARIADB_USER: glink_app
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_PASSWORD_FILE: /run/secrets/db_app_password
+    secrets:
+      - db_root_password
+      - db_app_password
+    volumes:
+      - data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./runtime-grants.sql:/docker-entrypoint-initdb.d/002-runtime-grants.sql:ro
+    command: ["--innodb-buffer-pool-size=128M", "--max-connections=40"]
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  data:
+secrets:
+  db_root_password:
+    file: ./secrets/db-root-password
+  db_app_password:
+    file: ./secrets/db-app-password
