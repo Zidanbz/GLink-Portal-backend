@@ -146,7 +146,7 @@ docker compose -f /srv/glink-portal/database/compose.yml up -d --wait --wait-tim
 docker compose -f /srv/glink-portal/database/compose.yml ps
 ```
 
-Setup membuat password acak root dan aplikasi langsung di server, tanpa mencetak nilainya. File secret berada di `/srv/glink-portal/database/secrets/`, permission root-only. Password aplikasi yang sama otomatis ditulis ke `/srv/glink-portal/shared/backend.env` dengan `DB_PORT=3308`. Setup menolak dijalankan ulang jika konfigurasi telah ada agar password tidak tertimpa.
+Setup membuat password acak root dan aplikasi langsung di server, tanpa mencetak nilainya. File secret berada di `/srv/glink-portal/database/secrets/`, dengan direktori induk mode 700 (hanya root dapat mengakses dari host). File yang dipasang ke container memiliki izin baca agar user mysql dapat membaca saat inisialisasi. Password aplikasi yang sama otomatis ditulis ke `/srv/glink-portal/shared/backend.env` dengan `DB_PORT=3308`. Setup menolak dijalankan ulang jika konfigurasi telah ada agar password tidak tertimpa.
 
 Image database menginisialisasi schema hanya pada volume kosong, lalu membatasi user `glink_app` ke SELECT/INSERT/UPDATE/DELETE. Schema berisi tiga tabel tanpa record; collation diseragamkan ke `utf8mb4_unicode_ci`. Ini adalah database baru, tidak otomatis memindahkan data pengembangan.
 

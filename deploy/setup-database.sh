@@ -13,10 +13,13 @@ umask 077
 install -d -m 755 "$BASE"
 install -d -m 750 -o root -g glink "$BASE/shared"
 install -d -m 700 "$BASE/database" "$BASE/database/secrets"
-for file in schema.sql runtime-grants.sql; do install -m 600 "$ROOT/$file" "$BASE/database/$file"; done
+for file in schema.sql runtime-grants.sql; do install -m 444 "$ROOT/$file" "$BASE/database/$file"; done
 install -m 600 "$ROOT/database.compose.yml" "$BASE/database/compose.yml"
 openssl rand -hex 32 > "$BASE/database/secrets/db-root-password"
 openssl rand -hex 32 > "$BASE/database/secrets/db-app-password"
+# Compose memasang file langsung: user mysql dalam container perlu izin baca.
+# Di host, direktori database/secrets mode 700 tetap membatasi akses ke root.
+chmod 444 "$BASE/database/secrets/db-root-password" "$BASE/database/secrets/db-app-password"
 DB_APP_PASSWORD=$(cat "$BASE/database/secrets/db-app-password")
 sed "s/REPLACE_ON_SERVER/$DB_APP_PASSWORD/" "$ROOT/backend.env.example" > "$BASE/shared/backend.env"
 chmod 600 "$BASE/shared/backend.env"
