@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
+const { singleAttachment } = require('./multipart');
 const store = require('./repositories');
 const attachments = require('./attachments');
 const { backendAccess } = require('./security');
@@ -103,7 +104,7 @@ app.get('/api/pengajuan/:id', async (req, res) => {
 });
 
 // POST new submission (Form submission)
-app.post('/api/pengajuan', upload.single('surat_dokter'), validateRequest, async (req, res) => {
+app.post('/api/pengajuan', singleAttachment(upload), validateRequest, async (req, res) => {
   try {
     const {
       nama,
@@ -161,7 +162,7 @@ app.post('/api/pengajuan', upload.single('surat_dokter'), validateRequest, async
 });
 
 // POST generate PDF directly from form data, save to MySQL, and trigger immediate download
-app.post('/api/generate-pdf', upload.single('surat_dokter'), validateRequest, async (req, res) => {
+app.post('/api/generate-pdf', singleAttachment(upload), validateRequest, async (req, res) => {
   try {
     const {
       nama,

@@ -25,4 +25,4 @@ Akses awal production hanya melalui SSH tunnel. Autentikasi dan otorisasi aplika
 
 ## Firebase + Vercel
 
-Deployment baru dengan Cloud Firestore dan Storage tersedia melalui `DATA_PROVIDER=firebase`. Mode default tetap MySQL; data lama tidak dihapus, dimigrasikan, atau disinkron otomatis. Ikuti [panduan Firebase dan Vercel](docs/FIREBASE_VERCEL.md) untuk membuat Firebase, mengatur secret, memasang rules privat, dan men-deploy backend/frontend terpisah.
+Deployment baru dengan Cloud Firestore dan Storage tersedia melalui `DATA_PROVIDER=firebase`. Mode default tetap MySQL; data lama tidak dihapus, dimigrasikan, atau disinkron otomatis. Ikuti [panduan Firebase dan Vercel](docs/FIREBASE_VERCEL.md) untuk membuat Firebase, mengatur secret, memasang rules privat, dan men-deploy backend ke Firebase Functions dan frontend ke Vercel.

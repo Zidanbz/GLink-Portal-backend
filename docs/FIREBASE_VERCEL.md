@@ -1,107 +1,132 @@
-# Firebase + Vercel, tanpa menghapus MySQL
+# Backend Firebase Functions + frontend Vercel
 
-Konfigurasi ini menyiapkan **deployment baru**. Database, data, lampiran, dan service di server lama tidak diubah atau dihapus. `DATA_PROVIDER` default tetap `mysql`; hanya deployment dengan `DATA_PROVIDER=firebase` memakai Firestore. Jangan mengubah `.env` server lama untuk mencoba Vercel.
+Arsitektur: browser → Next.js di Vercel → Express di Firebase Functions generasi 2 → Firestore / Storage privat. Backend **tidak perlu di-deploy ke Vercel**.
 
-Firebase baru mulai dengan data kosong. Tidak ada migrasi atau sinkronisasi otomatis dari MySQL. Pilih satu deployment untuk menerbitkan dokumen resmi; dua database terpisah bisa menerbitkan nomor yang sama. Nomor dinas Firebase baru mulai dari 0071/071. Sebelum dipakai resmi, rencanakan impor data/counter tertinggi dari MySQL atau tetapkan awal nomor yang disepakati; jangan mengedit counter ketika aplikasi sedang menerima pengajuan.
+MySQL lama, data, lampiran, dan service server lama tetap dipertahankan. `node server.js` masih memakai MySQL secara default. Hanya entrypoint `functions.js` yang memilih Firestore. Tidak ada migrasi atau sinkronisasi otomatis. Gunakan satu deployment untuk menerbitkan dokumen resmi agar nomor dari dua database tidak bertabrakan. Firebase baru dimulai dengan data kosong dan nomor dinas 0071/071.
 
-## 1. Membuat Firebase
+Backend awal sudah di-deploy dan diuji: health terproteksi, pembacaan Firestore, dan preview PDF. URL aktif: `https://asia-southeast1-approval-9134e.cloudfunctions.net/api`. Artifact Registry memiliki cleanup policy untuk image yang lebih lama dari 7 hari. Pengujian cloud tidak membuat pengajuan atau mengambil nomor surat resmi.
 
-1. Buka https://console.firebase.google.com/ dan pilih **Create a project**. Analytics tidak diperlukan untuk aplikasi ini. Catat **Project ID**.
-2. Buat **Cloud Firestore**, pilih **Standard / Native mode**, database `(default)`, dan lokasi dekat pengguna/server, misalnya Singapore jika tersedia. Pilih production mode; jangan membuka akses dengan test rules.
-3. Aktifkan **Cloud Storage** untuk lampiran. Firebase Storage memerlukan paket **Blaze** dan billing aktif. Kuota tanpa biaya bukan jaminan semua penggunaan gratis. Pasang budget alert; alert bukan pembatas pengeluaran otomatis. Catat bucket persis dari console, misalnya `PROJECT_ID.firebasestorage.app` (tanpa `gs://`).
-4. Untuk akses backend, gunakan service account khusus. Di Google Cloud IAM, berikan **Cloud Datastore User** pada project dan **Storage Object User** hanya pada bucket aplikasi. Buat JSON key untuk akun itu dan simpan secara privat di luar repository. Backend hanya memerlukan `project_id`, `client_email`, dan `private_key` dari key tersebut. Jangan kirim key lewat chat atau memasukkannya ke frontend/Git.
-5. Terapkan rules di `firebase/firestore.rules` dan `firebase/storage.rules` lewat tab Rules di console. Alternatif dari folder backend, setelah Firebase CLI terpasang:
+## 1. Firebase yang sudah dibuat
 
-   ```sh
-   firebase login
-   firebase deploy --only firestore:rules,storage --project PROJECT_ID
-   ```
+- Project ID: `approval-9134e`.
+- Database Firestore: `(default)`.
+- Storage bucket: `approval-9134e.firebasestorage.app`.
+- Rules privat: `firebase/firestore.rules` dan `firebase/storage.rules`.
+- Paket Blaze aktif. Functions, Cloud Build, Artifact Registry, Secret Manager, serta Storage dapat menimbulkan biaya; gunakan budget alert. Alert bukan batas belanja otomatis.
 
-Rules menolak seluruh akses SDK browser. Admin SDK backend mengakses lewat IAM, sehingga rules bukan pengganti autentikasi pada API. Tidak perlu memasang Firebase web SDK atau public API key di frontend.
+Backend menggunakan Application Default Credentials dari service account runtime Functions. **Private key JSON tidak diperlukan**, dan kredensial Firebase tidak perlu dimasukkan ke Vercel. Jika sudah mengunduh key dan tidak digunakan di tempat lain, hapus key tersebut melalui Google Cloud IAM → Service Accounts → akun terkait → Keys.
 
-## 2. Deploy backend ke Vercel
+Untuk akses minimum, service account runtime membutuhkan Cloud Datastore User pada project, Storage Object User pada bucket aplikasi, dan akses ke secret yang diikat ke function. Jangan memberikan Owner untuk mengatasi error izin. Akun yang menjalankan deploy juga membutuhkan izin deployment, mengaktifkan API, dan mengatur IAM sesuai pemeriksaan Firebase CLI. Pada project baru, role service account runtime dapat perlu diatur melalui Google Cloud IAM.
 
-Gunakan dua project Vercel agar kedua repository yang sudah ada tetap dapat dideploy sendiri.
+## 2. Persiapan lokal dan secret
 
-- Import repository backend. Jika memakai repository gabungan, Root Directory: `GLink Portal-Backend`.
-- Framework: **Other**. `vercel.json` menetapkan `framework: null` dan route ke `api/index.js`.
-- Build Command: kosong, Output Directory: default; jangan gunakan script packaging/systemd server lama.
-- Gunakan Node.js **24.x** di Project Settings. Install Command: `npm ci`.
-- Isi environment variable berikut untuk Production dan lingkungan Preview yang memang akan dipakai:
-
-| Variable | Isi |
-| --- | --- |
-| `DATA_PROVIDER` | `firebase` |
-| `FIREBASE_PROJECT_ID` | Project ID Firebase |
-| `FIREBASE_CLIENT_EMAIL` | `client_email` dari service account |
-| `FIREBASE_PRIVATE_KEY` | `private_key`, termasuk BEGIN/END; menerima newline asli atau literal `\n` |
-| `FIREBASE_STORAGE_BUCKET` | Nama bucket, tanpa `gs://` |
-| `BACKEND_API_SECRET` | Secret acak minimal 32 karakter |
-| `TZ` | `Asia/Makassar` |
-
-Generate `BACKEND_API_SECRET` di perangkatmu: `openssl rand -hex 32`. Simpan hasilnya di environment Vercel; jangan commit nilainya. `DB_*`, `UPLOAD_DIR`, `HOST`, dan `CHROME_EXECUTABLE_PATH` tidak dibutuhkan untuk deployment Vercel ini.
-
-Deploy lalu catat URL HTTPS backend. Mengaksesnya langsung tanpa secret memang mendapat 401; jika secret belum dikonfigurasi, mendapat 503. Ini disengaja agar URL backend tidak membuka data karyawan.
-
-## 3. Deploy frontend ke Vercel
-
-- Import repository frontend. Jika repository gabungan, Root Directory: `GLink Portal-frontend`.
-- Framework: **Next.js**, Node.js **24.x**, Install: `npm ci`, Build: `npm run build`.
-- Isi environment server berikut:
-
-| Variable | Isi |
-| --- | --- |
-| `BACKEND_URL` | Origin HTTPS backend, misalnya `https://nama-backend.vercel.app`, tanpa `/api` |
-| `BACKEND_API_SECRET` | Sama persis dengan secret backend |
-| `APP_ACCESS_USER` | Username akses sementara, tanpa karakter `:` |
-| `APP_ACCESS_PASSWORD` | Password acak minimal 16 karakter; misalnya buat dengan `openssl rand -hex 24` |
-
-Jangan beri prefix `NEXT_PUBLIC_` pada variable di atas. Secret backend ditambahkan oleh server Next.js, bukan dikirim ke JavaScript browser. Setelah environment berubah, redeploy project terkait.
-
-Pengunjung frontend diminta username/password oleh browser. Gerbang bersama ini cocok untuk uji coba terbatas, **bukan otorisasi per karyawan, atasan, atau HR**. Semua pemegang akses bersama memiliki akses API yang sama, termasuk perubahan persetujuan dan penghapusan. Untuk penggunaan operasional dengan hak akses berbeda, tambahkan akun pengguna dan pemeriksaan peran terlebih dahulu. Atur rate limit di Vercel Firewall sesuai pengguna/paket yang tersedia.
-
-Jika Vercel Deployment Protection memblokir request antardua project, pastikan URL backend production mengizinkan koneksi server frontend, atau konfigurasi bypass deployment protection secara server-only. Jangan membuka secret aplikasi ke browser untuk menyiasatinya.
-
-## 4. Verifikasi setelah deploy
-
-1. Buka URL frontend: tanpa login harus mendapat prompt akses.
-2. Buat pengajuan izin, cuti, dan dinas dengan data uji; pastikan data masuk ke collection Firebase yang sesuai dan PDF bisa diunduh.
-3. Upload gambar maksimal **2 MB**, lalu unduh ulang lampiran/PDF. Lampiran tersimpan privat di Storage melalui API `/uploads/...`, tanpa download token publik. PDF lampiran dapat diunduh, tetapi tidak digabung sebagai halaman gambar ke PDF surat.
-4. Pastikan request langsung ke backend tanpa secret ditolak dan akses langsung ke Firestore/Storage dari SDK browser ditolak oleh rules.
-5. Periksa log Vercel untuk cold start Chromium, durasi PDF, dan ukuran bundle. PDF lokal sudah dapat diuji, tetapi binary Linux/serverless tetap perlu smoke test pada deployment nyata.
-6. Jika ingin memakai MySQL lagi, gunakan deployment server lama dengan konfigurasi lamanya. Data baru Firebase tidak otomatis masuk kembali ke MySQL.
-
-## Batasan dan alur data
-
-- Vercel Functions membatasi request/response buffered sekitar **4,5 MB**. Lampiran dibatasi 2 MB agar ada ruang untuk form dan tanda tangan; total request tetap harus di bawah batas platform. PDF yang terlalu besar perlu dikompres atau nantinya diunduh langsung dari storage privat lewat URL sementara.
-- Firestore membatasi dokumen **1 MiB**; backend membatasi data terserialisasi 900 KiB. Lampiran disimpan di Storage, bukan sebagai base64 di Firestore. Tanda tangan tetap berupa data URL pada dokumen seperti struktur lama.
-- Penomoran izin Firebase menggunakan transaksi counter; nomor yang sudah dipesan dapat terlewati jika penyimpanan selanjutnya gagal. Nomor tidak dipakai ulang. Nomor dinas dan data disimpan atomik setelah PDF berhasil dibuat. Jika ada benturan nomor dinas, PDF dirender ulang dengan nomor baru; setelah lima benturan request mendapat 409 untuk dicoba lagi.
-- API daftar menggunakan `?limit=100&before=ID`, maksimal 200 per halaman, serta `nextCursor` pada respons. Pada Firebase, filter substring/status/jenis diterapkan **pada halaman yang dibaca**, bukan pencarian global. Lanjutkan cursor meskipun hasil filter kosong. Statistik izin menggunakan aggregate count untuk seluruh collection. Untuk dashboard besar, tambahkan pencarian khusus dan UI pagination.
-- Frontend dan API memakai origin yang sama bagi browser; server frontend meneruskan request ke backend. Tidak ada penulisan ganda ke MySQL dan Firebase.
-- Preview/development sebaiknya memakai project Firebase terpisah dari production agar percobaan tidak menerbitkan nomor atau menyimpan data ke production.
-
-## Pengujian lokal
-
-`npm test` di backend menjalankan unit test; pengujian MySQL dan Firebase integration bersifat opt-in.
-
-Untuk integration Firebase, gunakan project emulator `demo-glink-test` saja (bukan project nyata):
+Jalankan dari folder repository backend:
 
 ```sh
-firebase emulators:start --only firestore,storage --project demo-glink-test
+npm ci
+firebase login
 ```
 
-Di terminal lain, dari folder backend:
+Firebase CLI harus sudah terpasang (`npm install -g firebase-tools` jika belum). Untuk deploy, gunakan Node.js 22 yang sesuai runtime. Node.js runtime ditetapkan ke **22**, region **asia-southeast1**, memory **2 GiB**, concurrency **1**, minInstances **0**, maxInstances **3**, dan timeout **60 detik**. Batas instance membatasi konkurensi; bukan hard cap biaya.
+
+Buat secret sekali di terminal pribadi:
+
+```sh
+openssl rand -hex 32
+firebase functions:secrets:set BACKEND_API_SECRET --project approval-9134e
+```
+
+Salin hasil random ke prompt secret. Simpan nilainya di password manager karena nilai yang sama akan digunakan pada environment **server frontend Vercel**. Jangan kirim ke chat atau commit ke Git. SDK mengikat secret melalui Secret Manager. Perubahan secret memerlukan deploy ulang function agar versi baru dipakai.
+
+## 3. Deploy backend
+
+```sh
+npm run firebase:deploy -- --project approval-9134e
+```
+
+Script ini menyiapkan folder `.firebase-functions` dari daftar file yang diizinkan lalu menjalankan Firebase deploy untuk codebase `glink-api` saja. `package-lock.json` disertakan untuk instalasi konsisten. Folder tersebut diabaikan Git dan dibuat ulang setiap deploy. Jangan meletakkan file manual di sana.
+
+`.env` MySQL, private key, folder uploads lokal, skrip server lama, `db.js`, dan repository MySQL tidak disertakan dalam source deploy. Identitas runtime mengakses Firestore secara langsung. `GLINK_STORAGE_BUCKET` adalah parameter non-secret dari `firebase/functions.env`, yang disalin sebagai `.env` khusus pada paket deploy. Jika deploy ke project berbeda, sesuaikan file konfigurasi ini sebelum menyiapkan paket. `.env` MySQL di root repository tidak pernah disalin.
+
+Pada deploy pertama, Firebase CLI bisa meminta pengaktifan Cloud Functions, Cloud Run, Cloud Build, Artifact Registry, dan Secret Manager API. Jika Cloud Functions API masih disabled, aktifkan melalui console atau ikuti prompt deploy. Ikuti error IAM jika akun tidak memiliki izin; tidak perlu menginisialisasi ulang project dengan `firebase init`.
+
+Untuk menerapkan rules yang sudah direview:
+
+```sh
+firebase deploy --only firestore:rules,storage --project approval-9134e
+```
+
+Function yang dihasilkan bernama **api**. Salin URL dari output deploy, misalnya:
+
+```text
+https://asia-southeast1-approval-9134e.cloudfunctions.net/api
+```
+
+Gunakan URL aktual dari CLI; URL Cloud Run juga dapat diberikan. Awalan `/api` pada URL function harus tetap disertakan. Karena route Express juga diawali `/api`, URL health berbentuk `...cloudfunctions.net/api/api/health`. Frontend menambahkan path aplikasi secara otomatis tanpa membuang path function.
+
+Endpoint HTTP mengizinkan koneksi jaringan dari frontend Vercel, tetapi seluruh API dilindungi `BACKEND_API_SECRET`. Tanpa header secret mendapat 401; secret tidak terkonfigurasi mendapat 503. Rules Firestore/Storage tetap menolak SDK browser. Rules tidak menggantikan autentikasi API karena Admin SDK melewati rules dan memakai IAM.
+
+## 4. Deploy frontend ke Vercel
+
+Push perubahan backend dan frontend ke repository masing-masing. Import **repository frontend saja** ke Vercel:
+
+- Framework: Next.js.
+- Root Directory: `./` jika repository frontend terpisah; `GLink Portal-frontend` jika repository gabungan.
+- Install: `npm ci`; Build: `npm run build`.
+- Environment server berikut:
+
+| Variable | Isi |
+| --- | --- |
+| `BACKEND_URL` | URL lengkap function dari output deploy, termasuk `/api` jika ada |
+| `BACKEND_API_SECRET` | Sama persis dengan secret di Firebase |
+| `APP_ACCESS_USER` | Username gerbang akses, tanpa `:` |
+| `APP_ACCESS_PASSWORD` | Password acak minimal 16 karakter |
+
+Jangan gunakan prefix `NEXT_PUBLIC_`. Tidak perlu `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, atau `DB_*` di Vercel. Redeploy frontend setelah environment berubah.
+
+Gerbang username/password ini untuk akses bersama saat uji coba terbatas. Semua pemegang akses mempunyai kemampuan API yang sama, termasuk perubahan approval dan penghapusan. Sebelum dipakai dengan hak akses berbeda antara karyawan/atasan/HR, tambahkan akun dan pemeriksaan peran. Atur rate limit sesuai kebutuhan pada gateway/platform.
+
+## 5. Verifikasi deployment
+
+1. Pastikan frontend meminta login dan backend tanpa secret menolak akses.
+2. Buat pengajuan menggunakan data uji; cek collection Firestore dan unduh PDF izin, dinas, cuti.
+3. Upload lampiran maksimal **2 MB**, unduh ulang melalui aplikasi, dan pastikan akses Storage langsung tanpa otorisasi ditolak.
+4. Periksa log Functions untuk cold start Chromium, memory, dan izin service account. Chromium serverless dijalankan pada cloud; emulator lokal memakai Chrome lokal.
+5. Jangan menerbitkan surat resmi paralel pada MySQL dan Firebase. Data/nomor tidak otomatis tersinkron. Rencanakan impor read-only dari MySQL dan counter tertinggi secara terpisah jika data lama perlu ditampilkan.
+
+Upload Functions Framework menyediakan `rawBody` karena stream telah dikonsumsi; middleware khusus memutar ulang multipart ke multer. Attachment dipersist ke Storage privat, bukan disk runtime. PDF lampiran dapat diunduh tetapi belum digabung sebagai halaman PDF surat.
+
+Vercel frontend masih meneruskan API, sehingga batas request/response buffered sekitar **4,5 MB** tetap perlu diperhatikan walaupun backend ada di Firebase. Lampiran dibatasi 2 MB dan replay multipart 4 MB. Firestore memiliki batas dokumen 1 MiB; backend membatasi data terserialisasi 900 KiB. Untuk file besar, alur upload/download langsung ke storage privat memerlukan pengembangan terpisah.
+
+API daftar menggunakan `limit` (default 100, maksimum 200) dan cursor `before`, serta `nextCursor` pada respons. Filter Firebase diterapkan pada halaman yang dibaca, bukan pencarian global; lanjutkan cursor meskipun hasil kosong. Statistik izin menggunakan aggregate count seluruh collection.
+
+## 6. Pengujian lokal
+
+```sh
+npm test
+npm run firebase:prepare
+```
+
+Unit test mencakup replay multipart dan entrypoint Functions tanpa koneksi MySQL. Integration Firestore/Storage dan MySQL opt-in; jangan jalankan pada data nyata.
+
+Untuk emulator Functions, Firestore, dan Storage (Firebase CLI terbaru memerlukan Java 21+):
+
+```sh
+npm run firebase:emulators
+```
+
+Untuk mengirim request autentikasi lokal, sediakan secret emulator lewat environment lokal atau `.firebase-functions/.secret.local` **setelah** prepare; folder ini dibuat ulang oleh prepare. Jangan commit file secret. Selalu gunakan project `demo-glink-test`, tidak project production.
+
+Untuk integration repository dengan emulator aktif:
 
 ```sh
 GLINK_TEST_FIREBASE=1 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_STORAGE_EMULATOR_HOST=127.0.0.1:9199 npm test
 ```
 
-CLI Firebase terbaru memerlukan Java 21+. Test membersihkan collection pada **emulator demo lokal** sebelum berjalan dan tidak membuka koneksi MySQL. Jangan mengatur variable emulator di deployment production.
-
 ## Referensi
 
-- https://firebase.google.com/docs/firestore/manage-data/transactions
-- https://firebase.google.com/docs/firestore/security/insecure-rules
+- https://firebase.google.com/docs/functions/http-events
+- https://firebase.google.com/docs/functions/manage-functions
+- https://firebase.google.com/docs/functions/config-env
+- https://firebase.google.com/docs/admin/setup
 - https://firebase.google.com/docs/storage/faqs-storage-changes-announced-sept-2024
-- https://vercel.com/docs/functions/limitations
-- https://github.com/Sparticuz/chromium

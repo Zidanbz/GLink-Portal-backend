@@ -4,7 +4,8 @@ const { getStorage } = require('firebase-admin/storage');
 
 function firebaseApp() {
   if (getApps().length) return getApps()[0];
-  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const config = JSON.parse(process.env.FIREBASE_CONFIG || '{}');
+  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || config.projectId;
   if (!projectId) throw new Error('FIREBASE_PROJECT_ID wajib diisi.');
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');

@@ -12,3 +12,5 @@ firestore-debug*.log
 ui-debug*.log
 *service-account*.json
 *firebase-adminsdk*.json
+
+.firebase-functions/

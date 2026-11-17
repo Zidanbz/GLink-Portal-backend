@@ -1,7 +1,7 @@
 const fs = require('fs');
 
 async function browserOptions() {
-  if (process.env.VERCEL) {
+  if (process.env.VERCEL || (process.env.K_SERVICE && process.env.FUNCTIONS_EMULATOR !== 'true')) {
     const { default: chromium } = await import('@sparticuz/chromium');
     return {
       executablePath: await chromium.executablePath(),
