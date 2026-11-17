@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
-const pool = require('./db');
+const store = require('./repositories');
+const attachments = require('./attachments');
+const { backendAccess } = require('./security');
+const { validateRequest } = require('./validation');
 const { generatePdfFromData, generateHtmlTemplate } = require('./pdfGenerator');
 const { generateDinasPdfFromData, generateDinasHtmlTemplate } = require('./pdfDinasGenerator');
 const { generateCutiPdfFromData, generateCutiHtmlTemplate } = require('./pdfCutiGenerator');
@@ -14,59 +16,55 @@ const app = express();
 const PORT = process.env.PORT || 5101;
 const HOST = process.env.HOST || '127.0.0.1';
 
-// Ensure upload directory exists
-const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Multer configuration for file uploads (Surat Dokter / Bukti)
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, 'lampiran-' + uniqueSuffix + ext);
-  }
-});
-
+// Memory uploads are persisted to Storage, never to Vercel's deployment disk.
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 40, fieldSize: 900 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.mimetype)) {
+      return cb(Object.assign(new Error('Lampiran harus JPG, PNG, WEBP, atau PDF.'), { status: 400 }));
+    }
+    cb(null, true);
+  },
 });
+app.disable('x-powered-by');
+app.use(backendAccess);
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use(cors({ origin: false, exposedHeaders: ['Content-Disposition', 'X-Nomor-Surat', 'X-Nomor-Nota'] }));
+app.use(express.json({ limit: process.env.VERCEL ? '4mb' : '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: process.env.VERCEL ? '4mb' : '50mb' }));
+app.use(validateRequest);
 
-app.use(cors({ exposedHeaders: ['Content-Disposition', 'X-Nomor-Surat', 'X-Nomor-Nota'] }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// Serve uploaded files statically
-app.use('/uploads', express.static(uploadDir));
+app.get('/uploads/:filename', async (req, res, next) => {
+  try {
+    const file = await attachments.read(req.params.filename);
+    res.type(file.contentType).send(file.buffer);
+  } catch (error) { next(error); }
+});
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
-// Helper to generate nomor surat
 async function generateNomorSurat() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const prefix = `IZN/${year}/${month}`;
-
-  const [rows] = await pool.query(
-    'SELECT nomor_surat FROM pengajuan_izin WHERE nomor_surat LIKE ? ORDER BY id DESC LIMIT 1',
-    [`${prefix}/%`]
-  );
-
-  let seq = 1;
-  if (rows.length > 0) {
-    const lastNum = rows[0].nomor_surat.split('/').pop();
-    const parsed = parseInt(lastNum, 10);
-    if (!isNaN(parsed)) {
-      seq = parsed + 1;
+  const { issuanceDate } = require('./dinasIssuance');
+  const [year, month] = issuanceDate().split('-');
+  return store.nextIzinNumber(`IZN/${year}/${month}`);
+}
+function pageOptions(query) {
+  const limit = Number(query.limit || 100);
+  const before = query.before;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200 ||
+      (before !== undefined && (!/^\d+$/.test(String(before)) || !Number.isSafeInteger(Number(before)) || Number(before) < 1))) {
+    throw Object.assign(new Error('Parameter pagination tidak valid.'), { status: 400 });
+  }
+  for (const key of ['search', 'status', 'jenis']) {
+    if (query[key] !== undefined && (typeof query[key] !== 'string' || query[key].length > 200)) {
+      throw Object.assign(new Error('Filter tidak valid.'), { status: 400 });
     }
   }
-
-  return `${prefix}/${String(seq).padStart(3, '0')}`;
+  return { search: query.search, status: query.status, jenis: query.jenis, limit, before };
 }
 
 // --- ROUTES ---
@@ -79,68 +77,33 @@ app.get('/api/health', (req, res) => {
 // GET all submissions with search, filter, and summary stats
 app.get('/api/pengajuan', async (req, res) => {
   try {
-    const { search, status, jenis } = req.query;
-    let query = 'SELECT * FROM pengajuan_izin WHERE 1=1';
-    const params = [];
-
-    if (search) {
-      query += ' AND (nama LIKE ? OR jabatan LIKE ? OR nomor_surat LIKE ? OR alasan LIKE ?)';
-      const s = `%${search}%`;
-      params.push(s, s, s, s);
-    }
-
-    if (status && status !== 'Semua') {
-      query += ' AND status_persetujuan = ?';
-      params.push(status);
-    }
-
-    if (jenis && jenis !== 'Semua') {
-      query += ' AND jenis_izin = ?';
-      params.push(jenis);
-    }
-
-    query += ' ORDER BY id DESC';
-
-    const [rows] = await pool.query(query, params);
-
-    // Calculate stats
-    const [statsRows] = await pool.query(`
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN status_persetujuan = 'Menunggu Persetujuan' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status_persetujuan = 'Disetujui' THEN 1 ELSE 0 END) as disetujui,
-        SUM(CASE WHEN status_persetujuan = 'Ditangguhkan' THEN 1 ELSE 0 END) as ditangguhkan,
-        SUM(CASE WHEN status_persetujuan = 'Ditolak' THEN 1 ELSE 0 END) as ditolak
-      FROM pengajuan_izin
-    `);
-
-    res.json({
-      success: true,
-      data: rows,
-      stats: statsRows[0] || { total: 0, pending: 0, disetujui: 0, ditangguhkan: 0, ditolak: 0 }
-    });
+    const [{ rows, nextCursor }, stats] = await Promise.all([
+      store.list('pengajuan_izin', pageOptions(req.query)), store.stats(),
+    ]);
+    res.json({ success: true, data: rows, stats, nextCursor });
   } catch (error) {
     console.error('Error fetching pengajuan:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // GET single submission
 app.get('/api/pengajuan/:id', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_izin WHERE id = ?', [req.params.id]);
+    const item = await store.get('pengajuan_izin', req.params.id);
+    const rows = item ? [item] : [];
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data pengajuan tidak ditemukan' });
     }
     res.json({ success: true, data: rows[0] });
   } catch (error) {
     console.error('Error fetching detail pengajuan:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // POST new submission (Form submission)
-app.post('/api/pengajuan', upload.single('surat_dokter'), async (req, res) => {
+app.post('/api/pengajuan', upload.single('surat_dokter'), validateRequest, async (req, res) => {
   try {
     const {
       nama,
@@ -161,15 +124,10 @@ app.post('/api/pengajuan', upload.single('surat_dokter'), async (req, res) => {
     }
 
     const nomor_surat = await generateNomorSurat();
-    const surat_dokter_url = req.file ? `/uploads/${req.file.filename}` : null;
+    const surat_dokter_url = req.file ? await attachments.save(req.file) : null;
     const finalTanggalSurat = tanggal_surat || new Date().toISOString().split('T')[0];
 
-    const [result] = await pool.query(
-      `INSERT INTO pengajuan_izin (
-        nomor_surat, nama, id_karyawan, jabatan, jenis_izin, kategori_alasan, alasan,
-        tanggal_mulai, tanggal_selesai, masuk_kembali_tanggal,
-        surat_dokter_url, tanda_tangan_pemohon, status_persetujuan, tanggal_surat
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Menunggu Persetujuan', ?)`,
+    const result = await store.insert('pengajuan_izin', ['nomor_surat', 'nama', 'id_karyawan', 'jabatan', 'jenis_izin', 'kategori_alasan', 'alasan', 'tanggal_mulai', 'tanggal_selesai', 'masuk_kembali_tanggal', 'surat_dokter_url', 'tanda_tangan_pemohon', 'tanggal_surat', 'status_persetujuan'],
       [
         nomor_surat,
         nama,
@@ -183,7 +141,8 @@ app.post('/api/pengajuan', upload.single('surat_dokter'), async (req, res) => {
         masuk_kembali_tanggal,
         surat_dokter_url,
         tanda_tangan_pemohon || null,
-        finalTanggalSurat
+        finalTanggalSurat,
+        'Menunggu Persetujuan'
       ]
     );
 
@@ -197,12 +156,12 @@ app.post('/api/pengajuan', upload.single('surat_dokter'), async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating pengajuan:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // POST generate PDF directly from form data, save to MySQL, and trigger immediate download
-app.post('/api/generate-pdf', upload.single('surat_dokter'), async (req, res) => {
+app.post('/api/generate-pdf', upload.single('surat_dokter'), validateRequest, async (req, res) => {
   try {
     const {
       nama,
@@ -229,11 +188,11 @@ app.post('/api/generate-pdf', upload.single('surat_dokter'), async (req, res) =>
     }
 
     const nomor_surat = await generateNomorSurat();
-    const surat_dokter_url = req.file ? `/uploads/${req.file.filename}` : null;
+    const surat_dokter_url = req.file ? await attachments.save(req.file) : null;
     let suratDokterBase64 = null;
-    if (req.file) {
+    if (req.file && req.file.mimetype.startsWith('image/')) {
       try {
-        const fileBuffer = fs.readFileSync(req.file.path);
+        const fileBuffer = req.file.buffer;
         const mime = req.file.mimetype || 'image/jpeg';
         suratDokterBase64 = `data:${mime};base64,${fileBuffer.toString('base64')}`;
       } catch (err) {
@@ -244,13 +203,7 @@ app.post('/api/generate-pdf', upload.single('surat_dokter'), async (req, res) =>
     const finalTanggalSurat = tanggal_surat || new Date().toISOString().split('T')[0];
     const finalStatus = status_persetujuan || 'Menunggu Persetujuan';
 
-    const [result] = await pool.query(
-      `INSERT INTO pengajuan_izin (
-        nomor_surat, nama, id_karyawan, jabatan, jenis_izin, kategori_alasan, alasan,
-        tanggal_mulai, tanggal_selesai, masuk_kembali_tanggal,
-        surat_dokter_url, tanda_tangan_pemohon, status_persetujuan, tanggal_surat,
-        nama_atasan, tanda_tangan_atasan, nama_hrd, paraf_hrd, alasan_atasan
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    const result = await store.insert('pengajuan_izin', ['nomor_surat', 'nama', 'id_karyawan', 'jabatan', 'jenis_izin', 'kategori_alasan', 'alasan', 'tanggal_mulai', 'tanggal_selesai', 'masuk_kembali_tanggal', 'surat_dokter_url', 'tanda_tangan_pemohon', 'status_persetujuan', 'tanggal_surat', 'nama_atasan', 'tanda_tangan_atasan', 'nama_hrd', 'paraf_hrd', 'alasan_atasan'],
       [
         nomor_surat,
         nama,
@@ -309,10 +262,10 @@ app.post('/api/generate-pdf', upload.single('surat_dokter'), async (req, res) =>
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Nomor-Surat, X-Submission-Id');
     res.setHeader('X-Nomor-Surat', nomor_surat);
     res.setHeader('X-Submission-Id', result.insertId);
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error generating PDF:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -336,39 +289,30 @@ app.put('/api/pengajuan/:id/approval', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Status persetujuan wajib ditentukan.' });
     }
 
-    const [existing] = await pool.query('SELECT * FROM pengajuan_izin WHERE id = ?', [id]);
+    const item = await store.get('pengajuan_izin', id);
+    const existing = item ? [item] : [];
     if (existing.length === 0) {
       return res.status(404).json({ success: false, message: 'Data tidak ditemukan.' });
     }
 
-    await pool.query(
-      `UPDATE pengajuan_izin SET 
-        status_persetujuan = ?,
-        ditangguhkan_mulai = ?,
-        ditangguhkan_selesai = ?,
-        alasan_atasan = ?,
-        nama_atasan = ?,
-        tanda_tangan_atasan = COALESCE(?, tanda_tangan_atasan),
-        nama_hrd = ?,
-        paraf_hrd = COALESCE(?, paraf_hrd)
-      WHERE id = ?`,
-      [
-        status_persetujuan,
-        ditangguhkan_mulai || null,
-        ditangguhkan_selesai || null,
-        alasan_atasan || null,
-        nama_atasan || null,
-        tanda_tangan_atasan || null,
-        nama_hrd || 'HRD',
-        paraf_hrd || null,
-        id
-      ]
-    );
+    if (!['Menunggu Persetujuan', 'Disetujui', 'Ditangguhkan', 'Ditolak'].includes(status_persetujuan)) {
+      return res.status(400).json({ success: false, message: 'Status persetujuan tidak valid.' });
+    }
+    await store.updateApproval(id, {
+      status_persetujuan,
+      ditangguhkan_mulai: ditangguhkan_mulai || null,
+      ditangguhkan_selesai: ditangguhkan_selesai || null,
+      alasan_atasan: alasan_atasan || null,
+      nama_atasan: nama_atasan || null,
+      tanda_tangan_atasan: tanda_tangan_atasan || null,
+      nama_hrd: nama_hrd || 'HRD',
+      paraf_hrd: paraf_hrd || null,
+    });
 
     res.json({ success: true, message: 'Status persetujuan berhasil diperbarui.' });
   } catch (error) {
     console.error('Error updating approval:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -376,63 +320,60 @@ app.put('/api/pengajuan/:id/approval', async (req, res) => {
 app.delete('/api/pengajuan/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const [existing] = await pool.query('SELECT * FROM pengajuan_izin WHERE id = ?', [id]);
+    const item = await store.get('pengajuan_izin', id);
+    const existing = item ? [item] : [];
     if (existing.length === 0) {
       return res.status(404).json({ success: false, message: 'Data tidak ditemukan.' });
     }
 
-    if (existing[0].surat_dokter_url) {
-      const filePath = path.join(__dirname, existing[0].surat_dokter_url);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    }
-
-    await pool.query('DELETE FROM pengajuan_izin WHERE id = ?', [id]);
+    if (existing[0].surat_dokter_url) await attachments.remove(existing[0].surat_dokter_url);
+    await store.remove('pengajuan_izin', id);
     res.json({ success: true, message: 'Pengajuan izin berhasil dihapus.' });
   } catch (error) {
     console.error('Error deleting pengajuan:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // GET PDF generation
 app.get('/api/pengajuan/:id/pdf', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_izin WHERE id = ?', [req.params.id]);
+    const item = await store.get('pengajuan_izin', req.params.id);
+    const rows = item ? [item] : [];
     if (rows.length === 0) {
       return res.status(404).send('Data tidak ditemukan');
     }
 
-    const item = rows[0];
-    const pdfBuffer = await generatePdfFromData(item);
+    const docData = await attachments.hydrate(rows[0]);
+    const pdfBuffer = await generatePdfFromData(docData);
 
-    const filename = `Surat_Izin_${(item.nama || 'karyawan').replace(/\s+/g, '_')}_${item.nomor_surat.replace(/\//g, '-')}.pdf`;
+    const filename = `Surat_Izin_${(docData.nama || 'karyawan').replace(/\s+/g, '_')}_${docData.nomor_surat.replace(/\//g, '-')}.pdf`;
     const disposition = req.query.download === '1' ? 'attachment' : 'inline';
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error generating PDF:', error);
-    res.status(500).send('Gagal membuat PDF: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal membuat PDF: Silakan coba lagi.');
   }
 });
 
 // GET HTML Preview
 app.get('/api/pengajuan/:id/preview-html', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_izin WHERE id = ?', [req.params.id]);
+    const item = await store.get('pengajuan_izin', req.params.id);
+    const rows = item ? [item] : [];
     if (rows.length === 0) {
       return res.status(404).send('Data tidak ditemukan');
     }
 
-    const html = generateHtmlTemplate(rows[0]);
+    const html = generateHtmlTemplate(await attachments.hydrate(rows[0]));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (error) {
     console.error('Error generating HTML preview:', error);
-    res.status(500).send('Gagal memuat preview: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal memuat preview: Silakan coba lagi.');
   }
 });
 
@@ -443,11 +384,11 @@ app.get('/api/pengajuan/:id/preview-html', async (req, res) => {
 // GET all pengajuan dinas
 app.get('/api/pengajuan-dinas', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_dinas ORDER BY id DESC');
-    res.json({ success: true, data: rows });
+    const { rows, nextCursor } = await store.list('pengajuan_dinas', pageOptions(req.query));
+    res.json({ success: true, data: rows, nextCursor });
   } catch (error) {
     console.error('Error fetching pengajuan dinas:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -455,31 +396,32 @@ app.get('/api/pengajuan-dinas', async (req, res) => {
 app.get('/api/pengajuan-dinas/nomor-terbaru', async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ success: true, ...await previewDinasNumbers(pool) });
+    res.json({ success: true, ...await previewDinasNumbers(store.provider === 'mysql' ? store.pool : store) });
   } catch (error) {
     console.error('Error generating latest dinas numbers:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // GET single pengajuan dinas
 app.get('/api/pengajuan-dinas/:id', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_dinas WHERE id = ?', [req.params.id]);
+    const item = await store.get('pengajuan_dinas', req.params.id);
+    const rows = item ? [item] : [];
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
     }
     res.json({ success: true, data: rows[0] });
   } catch (error) {
     console.error('Error fetching single dinas:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // POST create / save pengajuan dinas
 app.post('/api/pengajuan-dinas', async (req, res) => {
   try {
-    const { data, id } = await issueDinas(pool, req.body);
+    const { data, id } = await issueDinas(store, req.body);
     const { nomor_surat, nomor_nota } = data;
 
     res.json({
@@ -491,7 +433,7 @@ app.post('/api/pengajuan-dinas', async (req, res) => {
     });
   } catch (error) {
     console.error('Error saving pengajuan dinas:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -500,32 +442,32 @@ app.post('/api/pengajuan-dinas', async (req, res) => {
 // POST generate PDF for download (on the fly from form body)
 app.post('/api/pengajuan-dinas/generate-pdf', async (req, res) => {
   try {
-    const { data, pdfBuffer } = await issueDinas(pool, req.body, generateDinasPdfFromData);
+    const { data, pdfBuffer } = await issueDinas(store, req.body, generateDinasPdfFromData);
     const safeName = (data.penerima_tugas_nama || 'karyawan').replace(/\s+/g, '_');
     const safeDoc = (data.nomor_surat || 'STD').replace(/\//g, '-');
     const filename = `Surat_Tugas_Dinas_${safeName}_${safeDoc}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error generating dinas PDF:', error);
-    res.status(500).send('Gagal membuat PDF: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal membuat PDF: Silakan coba lagi.');
   }
 });
 
 // POST preview PDF (stream inline on the fly from form body)
 app.post('/api/pengajuan-dinas/preview-pdf', async (req, res) => {
   try {
-    const data = { ...req.body, ...await previewDinasNumbers(pool) };
+    const data = { ...req.body, ...await previewDinasNumbers(store.provider === 'mysql' ? store.pool : store) };
 
     const pdfBuffer = await generateDinasPdfFromData(data);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="preview_dinas.pdf"');
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error previewing dinas PDF:', error);
-    res.status(500).send('Gagal membuat preview PDF: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal membuat preview PDF: Silakan coba lagi.');
   }
 });
 
@@ -536,25 +478,26 @@ app.post('/api/pengajuan-dinas/preview-pdf', async (req, res) => {
 // GET all pengajuan cuti
 app.get('/api/pengajuan-cuti', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_cuti ORDER BY id DESC');
-    res.json({ success: true, data: rows });
+    const { rows, nextCursor } = await store.list('pengajuan_cuti', pageOptions(req.query));
+    res.json({ success: true, data: rows, nextCursor });
   } catch (error) {
     console.error('Error fetching pengajuan cuti:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
 // GET single pengajuan cuti
 app.get('/api/pengajuan-cuti/:id', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM pengajuan_cuti WHERE id = ?', [req.params.id]);
+    const item = await store.get('pengajuan_cuti', req.params.id);
+    const rows = item ? [item] : [];
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
     }
     res.json({ success: true, data: rows[0] });
   } catch (error) {
     console.error('Error fetching single cuti:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -584,14 +527,7 @@ function validateCutiRequest(req, res, next) {
 app.post('/api/pengajuan-cuti', validateCutiRequest, async (req, res) => {
   try {
     const data = req.body;
-    const [result] = await pool.query(
-      `INSERT INTO pengajuan_cuti (
-        nomor_surat, nama, id_karyawan, jabatan, jenis_cuti,
-        alasan, tanggal_mulai, tanggal_selesai, hari_tanggal, masuk_kembali_tanggal,
-        hak_cuti, cuti_sudah_diambil, cuti_belum_diambil, cuti_akan_diambil, sisa_cuti,
-        penerima_amanah_nama, penerima_amanah_jabatan, nama_atasan, jabatan_atasan,
-        tanda_tangan_pemohon, tanda_tangan_atasan, status_persetujuan, tanggal_surat
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    const result = await store.insert('pengajuan_cuti', ['nomor_surat', 'nama', 'id_karyawan', 'jabatan', 'jenis_cuti', 'alasan', 'tanggal_mulai', 'tanggal_selesai', 'hari_tanggal', 'masuk_kembali_tanggal', 'hak_cuti', 'cuti_sudah_diambil', 'cuti_belum_diambil', 'cuti_akan_diambil', 'sisa_cuti', 'penerima_amanah_nama', 'penerima_amanah_jabatan', 'nama_atasan', 'jabatan_atasan', 'tanda_tangan_pemohon', 'tanda_tangan_atasan', 'status_persetujuan', 'tanggal_surat'],
       [
         data.nomor_surat || null,
         data.nama || '',
@@ -626,7 +562,7 @@ app.post('/api/pengajuan-cuti', validateCutiRequest, async (req, res) => {
     });
   } catch (error) {
     console.error('Error saving pengajuan cuti:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Operasi gagal. Silakan coba lagi.' });
   }
 });
 
@@ -640,10 +576,10 @@ app.post('/api/pengajuan-cuti/generate-pdf', validateCutiRequest, async (req, re
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error generating cuti PDF:', error);
-    res.status(500).send('Gagal membuat PDF: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal membuat PDF: Silakan coba lagi.');
   }
 });
 
@@ -654,13 +590,20 @@ app.post('/api/pengajuan-cuti/preview-pdf', validateCutiRequest, async (req, res
     const pdfBuffer = await generateCutiPdfFromData(data);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="preview_cuti.pdf"');
-    res.send(pdfBuffer);
+    res.send(Buffer.from(pdfBuffer));
   } catch (error) {
     console.error('Error previewing cuti PDF:', error);
-    res.status(500).send('Gagal membuat preview PDF: ' + error.message);
+    res.status(error.status || 500).send(error.status ? error.message : 'Gagal membuat preview PDF: Silakan coba lagi.');
   }
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`Backend server running on http://${HOST}:${PORT}`);
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  const status = ['LIMIT_FILE_SIZE', 'LIMIT_FIELD_VALUE'].includes(error.code) ? 413 : error.status || (error.code === 404 ? 404 : 500);
+  console.error('Request failed:', error.code || error.name);
+  res.status(status).json({ success: false, message: status === 413 ? 'Ukuran upload/data terlalu besar. Lampiran maksimal 2 MB.' : status < 500 ? error.message : 'Operasi gagal. Silakan coba lagi.' });
 });
+if (require.main === module && !process.env.VERCEL) {
+  app.listen(PORT, HOST, () => console.log(`Backend server running on http://${HOST}:${PORT}`));
+}
+module.exports = app;

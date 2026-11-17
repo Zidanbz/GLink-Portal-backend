@@ -1,3 +1,4 @@
+const { safeTemplateData, securePage } = require('./pdfSafety');
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
@@ -31,6 +32,7 @@ function formatDateRange(startDate, endDate) {
 }
 
 function generateHtmlTemplate(data) {
+  data = safeTemplateData(data);
   const isSakit = data.jenis_izin === 'Izin Sakit';
   const lampiranJudul = isSakit ? 'LAMPIRAN: SURAT KETERANGAN DOKTER' : 'LAMPIRAN: SURAT KETERANGAN';
   const isUpah = data.jenis_izin === 'Izin tidak masuk kerja' || data.jenis_izin === 'Izin tidak masuk kerja dengan menerimah upah';
@@ -540,10 +542,11 @@ function generateHtmlTemplate(data) {
 
 async function generatePdfFromData(data) {
   const htmlContent = generateHtmlTemplate(data);
-  const browser = await puppeteer.launch(browserOptions());
+  const browser = await puppeteer.launch(await browserOptions());
 
   try {
     const page = await browser.newPage();
+    await securePage(page);
     await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
     const pdfBuffer = await page.pdf({
       format: 'Letter',

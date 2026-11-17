@@ -1,3 +1,4 @@
+const { safeTemplateData, securePage } = require('./pdfSafety');
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
@@ -48,6 +49,7 @@ function formatHariTanggalRange(startDate, endDate) {
 }
 
 function generateDinasHtmlTemplate(data) {
+  data = safeTemplateData(data);
   const tanggalSuratObj = data.tanggal_surat ? dayjs(data.tanggal_surat) : dayjs();
   const tanggalSuratFormatted = tanggalSuratObj.isValid() ? tanggalSuratObj.format('DD MMMM YYYY') : dayjs().format('DD MMMM YYYY');
   const displayHariTanggal = data.hari_tanggal || formatHariTanggalRange(data.tanggal_mulai, data.tanggal_selesai) || tanggalSuratFormatted;
@@ -575,10 +577,11 @@ function generateDinasHtmlTemplate(data) {
 
 async function generateDinasPdfFromData(data) {
   const htmlContent = generateDinasHtmlTemplate(data);
-  const browser = await puppeteer.launch(browserOptions());
+  const browser = await puppeteer.launch(await browserOptions());
 
   try {
     const page = await browser.newPage();
+    await securePage(page);
     await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
     const pdfBuffer = await page.pdf({
       format: 'A4',

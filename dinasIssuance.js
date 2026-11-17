@@ -8,7 +8,7 @@ function issuanceDate(now = new Date()) {
 }
 
 async function previewDinasNumbers(connection, now = new Date()) {
-  const tanggal_surat = issuanceDate(now);
+  if (connection.provider === 'firebase') return connection.previewDinasNumbers(now);
   const [rows] = await connection.query('SELECT nomor_surat, nomor_nota FROM pengajuan_dinas');
   let surat = 70;
   let nota = 70;
@@ -18,6 +18,11 @@ async function previewDinasNumbers(connection, now = new Date()) {
     if (suratMatch) surat = Math.max(surat, Number(suratMatch[1]));
     if (notaMatch) nota = Math.max(nota, Number(notaMatch[1]));
   }
+  return formatDinasNumbers(surat, nota, now);
+}
+
+function formatDinasNumbers(surat, nota, now = new Date()) {
+  const tanggal_surat = issuanceDate(now);
   const [year, month] = tanggal_surat.split('-');
   const roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'][Number(month) - 1];
   return {
@@ -77,7 +82,8 @@ async function insertDinas(connection, data) {
 // Use a database-wide lock on the same connection as the transaction so separate
 // server processes cannot issue the same number. Preview never reserves a number.
 async function issueDinas(pool, input, renderPdf) {
-  const connection = await pool.getConnection();
+  if (pool.provider === 'firebase') return pool.issueDinas(input, renderPdf);
+  const connection = await (pool.pool || pool).getConnection();
   let locked = false;
   try {
     const [[lock]] = await connection.query('SELECT GET_LOCK(?, 60) AS acquired', [LOCK_NAME]);
@@ -101,4 +107,4 @@ async function issueDinas(pool, input, renderPdf) {
   }
 }
 
-module.exports = { issuanceDate, previewDinasNumbers, issueDinas };
+module.exports = { issuanceDate, formatDinasNumbers, previewDinasNumbers, issueDinas };

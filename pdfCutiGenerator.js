@@ -1,3 +1,4 @@
+const { safeTemplateData, securePage } = require('./pdfSafety');
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
@@ -31,6 +32,7 @@ function formatDateRange(startDate, endDate) {
 }
 
 function generateCutiHtmlTemplate(data) {
+  data = safeTemplateData(data);
   const isCutiTahunan = !data.jenis_cuti || data.jenis_cuti === 'Cuti Tahunan';
   const isCutiMelahirkan = data.jenis_cuti === 'Cuti Melahirkan';
   const isCutiLainnya = data.jenis_cuti === 'Cuti Lainnya';
@@ -530,10 +532,11 @@ function generateCutiHtmlTemplate(data) {
 
 async function generateCutiPdfFromData(data) {
   const htmlContent = generateCutiHtmlTemplate(data);
-  const browser = await puppeteer.launch(browserOptions());
+  const browser = await puppeteer.launch(await browserOptions());
 
   try {
     const page = await browser.newPage();
+    await securePage(page);
     await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
     const pdfBuffer = await page.pdf({
       format: 'A4',

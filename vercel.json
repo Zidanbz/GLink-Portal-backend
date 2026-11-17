@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60,
+      "includeFiles": "{assets/**,node_modules/@sparticuz/chromium/bin/**}",
+      "excludeFiles": "{uploads/**,test/**,deploy/**,docs/**,.env*}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "framework": null
+}
